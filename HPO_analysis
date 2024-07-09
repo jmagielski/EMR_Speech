@@ -1,0 +1,791 @@
+start <- Sys.time()
+message(" \n Running genotype-phenotype associations... \n ")
+
+library(librarian)
+librarian::shelf(network, scales, Hmisc, lubridate, foreach, doParallel, stringr, tidyverse,
+                 readxl, ggplot2, coefplot, lme4, nnet, future, foreach)
+
+# Read in the files.
+
+hpo_def <- read_csv("hpo_ancestors_def_2023_10.csv")
+
+pat_info <- read_csv("pat_info_v10.csv") %>%
+  mutate(MRN = as.character(pat_mrn_id)) %>% 
+  dplyr::select(pat_id, MRN) %>% 
+  distinct() %>% 
+  mutate(MRN = str_pad(MRN, 8, pad = "0"))
+
+egrp_prop <- read_csv("binned_pos_base_3month_v10.csv") %>%
+  left_join(pat_info) %>%
+  filter(!is.na(MRN))
+
+binned_prop <- egrp_prop
+
+########### Speech/Language HPO-genes associations ################
+
+flat_prop <- binned_prop %>% dplyr::select(-c(start_year, finish_year, seq_id)) %>% distinct() %>%
+  left_join(hpo_def, by = "HPO") %>% 
+  separate_rows(ancs, sep = ";") %>%
+  select(-HPO, -def) %>%
+  rename(HPO = ancs) %>%
+  left_join(hpo_def %>% select(HPO, def)) %>%
+  unique()
+
+hpo_child <- hpo_def %>% 
+  dplyr::select(-def) %>% 
+  separate_rows(ancs, sep = ";")
+
+#### Gene classes: class 1, class 2, class 3 ####
+gene_class_1 <- read_csv("class1_samples_feb2024.csv") %>%
+  dplyr::select(SYMBOL, EGRPID) %>%
+  mutate(SYMBOL = paste0("class1_", SYMBOL, sep="")) %>%
+  unique()
+colnames(gene_class_1) <- c("Gene", "RECORD_ID")
+
+gene_class_2 <- read_csv("class2_samples_feb2024.csv") %>%
+  dplyr::select(SYMBOL, EGRPID) %>%
+  mutate(SYMBOL = paste0("class2_", SYMBOL, sep="")) %>%
+  unique()
+colnames(gene_class_2) <- c("Gene", "RECORD_ID")
+
+gene_class_3 <- read_csv("class3_samples_feb2024.csv") %>%
+  dplyr::select(SYMBOL, EGRPID) %>%
+  mutate(SYMBOL = paste0("class3_", SYMBOL, sep="")) %>%
+  unique()
+colnames(gene_class_3) <- c("Gene", "RECORD_ID")
+
+#Survival
+engin_diagnoses <- read_csv("engin_genetic_2023-12-07.csv") %>%
+  dplyr::select(MRN, Gene) %>%
+  mutate(MRN = str_pad(MRN, 8, pad = "0")) %>%
+  unique()
+
+EGRP_MRNs <- read_xlsx("EGRP_MRNs.xlsx") %>%
+  filter(grepl("EG", egrp_family_id)) %>%
+  filter(!is.na(egrp_proband_id_2)) %>%
+  dplyr::select(egrp_family_id, proband_mrn) %>%
+  mutate(proband_mrn = case_when(proband_mrn == "N/A" ~ egrp_family_id,
+                                 proband_mrn == "n/a" ~ egrp_family_id,
+                                 proband_mrn == "Non-CHOP patient" ~ egrp_family_id,
+                                 proband_mrn == "Non CHOP patient" ~ egrp_family_id,
+                                 TRUE ~ proband_mrn)) %>%
+  mutate(proband_mrn = str_pad(proband_mrn, 8, pad = "0")) %>%
+  unique()
+colnames(EGRP_MRNs) <- c("RECORD_ID", "MRN")
+
+### This table will allow you to give the gene classes tables and MRN by merging with RECORD_ID
+survival_f <- EGRP_MRNs %>%
+  left_join(engin_diagnoses)
+
+no_gene_dx_ID <- survival_f %>%
+  filter(is.na(Gene)) %>% dplyr::select(-Gene)
+
+#Table A: People w/o genedx: keep all variants
+no_genedx_all_class <- gene_class_1 %>% 
+  rbind(gene_class_2, gene_class_3) %>% 
+  filter(RECORD_ID %in% no_gene_dx_ID$RECORD_ID) %>%
+  left_join(no_gene_dx_ID)
+
+#Table B: People w/  genedx: keep ONLY dx_gene 
+gene_dx_ID <- survival_f %>%
+  filter(!is.na(Gene))
+
+genedx_all_class <- gene_class_1 %>% 
+  rbind(gene_class_2, gene_class_3) %>% 
+  filter(RECORD_ID %in% gene_dx_ID$RECORD_ID) %>%
+  left_join(gene_dx_ID, by = 'RECORD_ID')
+
+colnames(genedx_all_class) <- (c('Gene', 'RECORD_ID', 'MRN', 'Genedx'))
+
+genedx_all_class <- genedx_all_class %>%
+  separate(col=Gene, into=c('class', 'gene'), sep='_', remove=FALSE) %>%
+  mutate(gene = gsub(':NM', '', gene)) %>%
+  separate_rows(Genedx, sep = ";") %>%
+  filter(gene == Genedx) %>%
+  dplyr::select(-c(class, gene, Genedx))
+
+
+#Bind A and B together 
+all_class <- genedx_all_class %>%
+  rbind(no_genedx_all_class) %>%
+  filter(MRN %in% flat_prop$MRN) %>%
+  unique()
+
+EGRP_speech_exome_MRNs <- all_class %>%
+  select(MRN) %>%
+  unique() %>%
+  write_csv("EGRP_speech_exome_MRNs.csv")
+
+flat_prop <- flat_prop %>%
+  filter(MRN %in% all_class$MRN)
+
+hpo_speech_child <- hpo_child %>%
+  filter(grepl("HP:0034434|HP:0011098|HP:0002167", ancs)) %>%
+  left_join(hpo_def %>% dplyr::select(-ancs), by="HPO")
+
+hpo_speech <- hpo_speech_child %>%
+  filter(HPO %in% flat_prop$HPO) %>%
+  left_join(hpo_def %>% select(HPO, def)) %>%
+  unique()
+
+speech_MRNs <- flat_prop %>%
+  filter(HPO %in% hpo_speech) %>%
+  unique() %>%
+  dplyr::select(MRN) %>%
+  unique() %>%
+  pull(MRN)
+
+flat_prop_speech <- flat_prop %>%
+  filter(HPO %in% hpo_speech_child$HPO)
+
+IDs_MRNs <- all_class %>%
+  select(RECORD_ID, MRN)
+
+
+#### Load demographics data 
+egrp_info <- read_csv("egrp_dei_06122024.csv") %>%
+  mutate(CONTACT_AGE = gsub(" days", "", CONTACT_AGE)) %>%
+  mutate(CONTACT_AGE = as.numeric(CONTACT_AGE)) %>%
+  mutate(CONTACT_AGE = round(CONTACT_AGE/365)) %>%
+  rename(AGE = CONTACT_AGE) %>%
+  select(-PAT_KEY) %>%
+  left_join(IDs_MRNs) %>%
+  unique()
+
+reg <- all_class %>%
+  left_join(egrp_info %>% select(-RECORD_ID), by = "MRN") %>%
+  left_join(flat_prop_speech %>% select(-pat_id), by = "MRN")
+  
+  
+#### Logistic regression analysis
+
+hpo_speech <- hpo_speech_child %>% pull(HPO) %>% unique()
+
+#### Class 1 variants
+
+genes <- all_class %>% filter(grepl("class1", Gene)) %>% pull(Gene) %>% unique()
+
+registerDoParallel(makeCluster(round( (detectCores()-4)/4 )))
+
+results_df <- foreach(y = 1:length(genes), .combine = rbind) %dopar% {
+  #y = 1
+  library(dplyr)
+  library(doParallel)
+  variant <- genes[y]
+  #variant <- "class1_MAZ"
+  print(variant)
+  
+  gene <- reg %>%
+    filter(Gene == variant) %>%
+    select(-HPO, -def) %>%
+    unique()
+  
+  outcome_results <- NULL 
+  for(i in 1:length(hpo_speech)){
+    speech_hpo <- hpo_speech[i]
+    #speech_hpo <- "HP:0025268"
+    print(speech_hpo)
+    #     
+    
+    yes_pats <- reg %>% filter(HPO == speech_hpo) %>% pull(MRN) %>% unique()
+    
+    yesg_pats <- reg %>% filter(MRN %in% yes_pats) %>% filter(MRN %in% gene$MRN) %>% pull(MRN) %>% unique() %>% length()
+    
+    if (yesg_pats < 2) {
+      tmp <- NULL
+    } else {
+      
+      reg_spec <- reg %>%
+        mutate(Gene = case_when(MRN %in% gene$MRN ~ as.character(variant), TRUE ~ "Other")) %>%
+        select(-HPO, -def) %>%
+        mutate(speech_phen = case_when(MRN %in% yes_pats ~ "1", TRUE ~ "0")) %>%
+        mutate(speech_phen = as.numeric(speech_phen)) %>%
+        unique() %>%
+        mutate(Gene = factor(Gene))
+      
+      reg_spec_gene <- reg_spec %>% pull(Gene) %>% unique() %>% length()
+      
+      if (length(levels(reg_spec$Gene)) < 2){
+        tmp <- NULL
+      } else{
+        
+        reg_spec$Gene <- relevel(reg_spec$Gene, ref = "Other")
+        
+        model <- glm(speech_phen ~ Gene + AGE + SEX + RACE + ETHNICITY, data = reg_spec, family = binomial)
+        coefficients <- summary(model)$coefficients[, "Estimate"]
+        standard_errors <- summary(model)$coefficients[, "Std. Error"]
+        z_values <- summary(model)$coefficients[, "z value"]
+        p_values <- summary(model)$coefficients[, "Pr(>|z|)"]
+        odds_ratios <- exp(coefficients)
+        lower_ci <- exp(coefficients - 1.96 * standard_errors)
+        upper_ci <- exp(coefficients + 1.96 * standard_errors)
+        
+        pats <- flat_prop$MRN %>% unique() %>% length()
+        
+        yes_npats <- reg_spec %>% 
+          filter(speech_phen == 1 & RECORD_ID %in% gene$RECORD_ID) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        tot_gene_pats <- reg_spec %>% 
+          filter(RECORD_ID %in% gene$RECORD_ID) %>%
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        yes_freq <- yes_npats / tot_gene_pats
+        
+        tot_no_gene_pats <- pats - tot_gene_pats
+        
+        no_gene_npats <- reg_spec %>% 
+          filter(Gene == "Other" & speech_phen == 1) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        no_freq <- no_gene_npats / tot_no_gene_pats
+        
+        tmp <- data.frame(HPO = speech_hpo, Coefficients = coefficients, SE = standard_errors, p_value = p_values, z_value = z_values,
+                          OR = odds_ratios, CI_lower = lower_ci, CI_upper = upper_ci, 
+                          yes_npats = yes_npats, tot_gene_pats = tot_gene_pats, yes_freq = yes_freq, 
+                          tot_no_gene_pats = tot_no_gene_pats, no_freq = no_freq, gene = variant)}}
+    
+    outcome_results <- rbind(outcome_results,tmp)
+  }
+  return(outcome_results)
+}
+
+stopCluster(makeCluster(detectCores()-4))
+
+write_csv(results_df, "outcome_results_class1_term_v2.csv")
+
+rownames <- rownames(results_df)
+
+results_df_class1 <- results_df %>%
+  #rename(HPO = Outcome) %>%
+  mutate(predictor = rownames)
+write_csv(results_df_class1, "log_reg_results_class1_speech_term_v2.csv")
+
+results_df_class1_genes <- results_df_class1 %>%
+  filter(grepl("Gene", predictor)) %>%
+  mutate(predictor = gsub("Gene", "", predictor)) %>%
+  left_join(hpo_def %>% select(HPO, def), by = "HPO") %>%
+  unique()
+write_csv(results_df_class1_genes, "log_reg_results_class1_genes_speech_term_v2.csv")
+
+#### Class 2 variants
+
+genes <- all_class %>% filter(grepl("class2", Gene)) %>% pull(Gene) %>% unique()
+
+
+# registerDoParallel(makeCluster(detectCores()-4))
+
+registerDoParallel(makeCluster(round( (detectCores()-4)/4 )))
+
+
+results_df <- foreach(y = 1:length(genes), .combine = rbind) %dopar% {
+  #y = 1
+  library(dplyr)
+  library(doParallel)
+  variant <- genes[y]
+  #variant <- "class2_MAZ"
+  print(variant)
+  
+  gene <- reg %>%
+    filter(Gene == variant) %>%
+    select(-HPO, -def) %>%
+    unique()
+  
+  outcome_results <- NULL 
+  for(i in 1:length(hpo_speech)){
+    speech_hpo <- hpo_speech[i]
+    #speech_hpo <- "HP:0025268"
+    print(speech_hpo)
+    #     
+    
+    yes_pats <- reg %>% filter(HPO == speech_hpo) %>% pull(MRN) %>% unique()
+    
+    yesg_pats <- reg %>% filter(MRN %in% yes_pats) %>% filter(MRN %in% gene$MRN) %>% pull(MRN) %>% unique() %>% length()
+    
+    if (yesg_pats < 2) {
+      tmp <- NULL
+    } else {
+      
+      reg_spec <- reg %>%
+        mutate(Gene = case_when(MRN %in% gene$MRN ~ as.character(variant), TRUE ~ "Other")) %>%
+        select(-HPO, -def) %>%
+        mutate(speech_phen = case_when(MRN %in% yes_pats ~ "1", TRUE ~ "0")) %>%
+        mutate(speech_phen = as.numeric(speech_phen)) %>%
+        unique() %>%
+        mutate(Gene = factor(Gene))
+      
+      reg_spec_gene <- reg_spec %>% pull(Gene) %>% unique() %>% length()
+      
+      if (length(levels(reg_spec$Gene)) < 2){
+        tmp <- NULL
+      } else{
+        
+        reg_spec$Gene <- relevel(reg_spec$Gene, ref = "Other")
+        
+        model <- glm(speech_phen ~ Gene + AGE + SEX + RACE + ETHNICITY, data = reg_spec, family = binomial)
+        coefficients <- summary(model)$coefficients[, "Estimate"]
+        standard_errors <- summary(model)$coefficients[, "Std. Error"]
+        z_values <- summary(model)$coefficients[, "z value"]
+        p_values <- summary(model)$coefficients[, "Pr(>|z|)"]
+        odds_ratios <- exp(coefficients)
+        lower_ci <- exp(coefficients - 1.96 * standard_errors)
+        upper_ci <- exp(coefficients + 1.96 * standard_errors)
+        
+        pats <- flat_prop$MRN %>% unique() %>% length()
+        
+        yes_npats <- reg_spec %>% 
+          filter(speech_phen == 1 & RECORD_ID %in% gene$RECORD_ID) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        tot_gene_pats <- reg_spec %>% 
+          filter(RECORD_ID %in% gene$RECORD_ID) %>%
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        yes_freq <- yes_npats / tot_gene_pats
+        
+        tot_no_gene_pats <- pats - tot_gene_pats
+        
+        no_gene_npats <- reg_spec %>% 
+          filter(Gene == "Other" & speech_phen == 1) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        no_freq <- no_gene_npats / tot_no_gene_pats
+        
+        tmp <- data.frame(HPO = speech_hpo, Coefficients = coefficients, SE = standard_errors, p_value = p_values, z_value = z_values,
+                          OR = odds_ratios, CI_lower = lower_ci, CI_upper = upper_ci, 
+                          yes_npats = yes_npats, tot_gene_pats = tot_gene_pats, yes_freq = yes_freq, 
+                          tot_no_gene_pats = tot_no_gene_pats, no_freq = no_freq, gene = variant)}}
+    
+    outcome_results <- rbind(outcome_results,tmp)
+  }
+  return(outcome_results)
+}
+
+stopCluster(makeCluster(detectCores()-4))
+
+write_csv(results_df, "outcome_results_class2_term_v2.csv")
+
+rownames <- rownames(results_df)
+
+results_df_class2 <- results_df %>%
+  #rename(HPO = Outcome) %>%
+  mutate(predictor = rownames)
+write_csv(results_df_class2, "log_reg_results_class2_speech_term_v2.csv")
+
+results_df_class2_genes <- results_df_class2 %>%
+  filter(grepl("Gene", predictor)) %>%
+  mutate(predictor = gsub("Gene", "", predictor)) %>%
+  left_join(hpo_def %>% select(HPO, def), by = "HPO") %>%
+  unique()
+write_csv(results_df_class2_genes, "log_reg_results_class2_genes_speech_term_v2.csv")
+
+
+#### Class 3 variants
+
+genes <- all_class %>% filter(grepl("class3", Gene)) %>% pull(Gene) %>% unique()
+
+
+registerDoParallel(makeCluster(round( (detectCores()-4)/4 )))
+
+
+results_df <- foreach(y = 1:length(genes), .combine = rbind) %dopar% {
+  #y = 1
+  library(dplyr)
+  library(doParallel)
+  variant <- genes[y]
+  #variant <- "class3_MAZ"
+  print(variant)
+  
+  gene <- reg %>%
+    filter(Gene == variant) %>%
+    select(-HPO, -def) %>%
+    unique()
+  
+  outcome_results <- NULL 
+  for(i in 1:length(hpo_speech)){
+    speech_hpo <- hpo_speech[i]
+    #speech_hpo <- "HP:0025268"
+    print(speech_hpo)
+    #     
+    
+    yes_pats <- reg %>% filter(HPO == speech_hpo) %>% pull(MRN) %>% unique()
+    
+    yesg_pats <- reg %>% filter(MRN %in% yes_pats) %>% filter(MRN %in% gene$MRN) %>% pull(MRN) %>% unique() %>% length()
+    
+    if (yesg_pats < 2) {
+      tmp <- NULL
+    } else {
+      
+      reg_spec <- reg %>%
+        mutate(Gene = case_when(MRN %in% gene$MRN ~ as.character(variant), TRUE ~ "Other")) %>%
+        select(-HPO, -def) %>%
+        mutate(speech_phen = case_when(MRN %in% yes_pats ~ "1", TRUE ~ "0")) %>%
+        mutate(speech_phen = as.numeric(speech_phen)) %>%
+        unique() %>%
+        mutate(Gene = factor(Gene))
+      
+      reg_spec_gene <- reg_spec %>% pull(Gene) %>% unique() %>% length()
+      
+      if (length(levels(reg_spec$Gene)) < 2){
+        tmp <- NULL
+      } else{
+        
+        reg_spec$Gene <- relevel(reg_spec$Gene, ref = "Other")
+        
+        model <- glm(speech_phen ~ Gene + AGE + SEX + RACE + ETHNICITY, data = reg_spec, family = binomial)
+        coefficients <- summary(model)$coefficients[, "Estimate"]
+        standard_errors <- summary(model)$coefficients[, "Std. Error"]
+        z_values <- summary(model)$coefficients[, "z value"]
+        p_values <- summary(model)$coefficients[, "Pr(>|z|)"]
+        odds_ratios <- exp(coefficients)
+        lower_ci <- exp(coefficients - 1.96 * standard_errors)
+        upper_ci <- exp(coefficients + 1.96 * standard_errors)
+        
+        pats <- flat_prop$MRN %>% unique() %>% length()
+        
+        yes_npats <- reg_spec %>% 
+          filter(speech_phen == 1 & RECORD_ID %in% gene$RECORD_ID) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        tot_gene_pats <- reg_spec %>% 
+          filter(RECORD_ID %in% gene$RECORD_ID) %>%
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        yes_freq <- yes_npats / tot_gene_pats
+        
+        tot_no_gene_pats <- pats - tot_gene_pats
+        
+        no_gene_npats <- reg_spec %>% 
+          filter(Gene == "Other" & speech_phen == 1) %>% 
+          pull(MRN) %>%
+          unique() %>%
+          length()
+        
+        no_freq <- no_gene_npats / tot_no_gene_pats
+        
+        tmp <- data.frame(HPO = speech_hpo, Coefficients = coefficients, SE = standard_errors, p_value = p_values, z_value = z_values,
+                          OR = odds_ratios, CI_lower = lower_ci, CI_upper = upper_ci, 
+                          yes_npats = yes_npats, tot_gene_pats = tot_gene_pats, yes_freq = yes_freq, 
+                          tot_no_gene_pats = tot_no_gene_pats, no_freq = no_freq, gene = variant)}}
+    
+    outcome_results <- rbind(outcome_results,tmp)
+  }
+  return(outcome_results)
+}
+
+stopCluster(makeCluster(detectCores()-4))
+
+write_csv(results_df, "outcome_results_class3_term_v2.csv")
+
+rownames <- rownames(results_df)
+
+results_df_class3 <- results_df %>%
+  #rename(HPO = Outcome) %>%
+  mutate(predictor = rownames)
+write_csv(results_df_class3, "log_reg_results_class3_speech_term_v2.csv")
+
+results_df_class3_genes <- results_df_class3 %>%
+  filter(grepl("Gene", predictor)) %>%
+  mutate(predictor = gsub("Gene", "", predictor)) %>%
+  left_join(hpo_def %>% select(HPO, def), by = "HPO") %>%
+  unique()
+write_csv(results_df_class3_genes, "log_reg_results_class3_genes_speech_term_v2.csv")
+
+#### Merging results from all variant classes
+
+log_reg_class1 <- read_csv("log_reg_results_class1_genes_speech_term_v2.csv")
+log_reg_class2 <- read_csv("log_reg_results_class2_genes_speech_term_v2.csv")
+log_reg_class3 <- read_csv("log_reg_results_class3_genes_speech_term_v2.csv")
+
+
+log_reg_all <- log_reg_class1 %>% rbind(log_reg_class2, log_reg_class3) %>%  filter(yes_npats > 1) %>% unique()
+
+write.csv(log_reg_all, "log_reg_all_v2.csv")
+
+log_reg_all_FDR <- log_reg_all %>%
+  arrange(as.numeric(p_value)) %>%
+  mutate(rank = seq(1:nrow(log_reg_all))) %>%  
+  mutate(p_adj = 0.05*rank/nrow(log_reg_all)) %>% 
+  mutate(SIG = case_when(p_value < 0.05 ~ "SIG", TRUE ~ "NOT")) %>%
+  mutate(FDR_SIG = case_when(p_value < p_adj ~ "SIG", TRUE ~ "NOT")) %>%
+  select(-predictor) %>%
+  separate(gene, into = c("class", "gene"), sep = "_")
+
+hpo_sig9 <- log_reg_all_FDR %>%
+  filter(OR > 1) 
+
+hpo_sig_genes <- hpo_sig9 %>%
+  dplyr::select(gene, p_value, FDR_SIG)
+# mutate(gene = gsub(':NM', '', gene)) %>%
+# dplyr::select(gene, p_value, FDR_SIG) 
+
+hpo_sig_genes_list <- hpo_sig_genes %>% dplyr::select(gene) %>% unique() %>% pull()
+
+install.packages("BiocManager")
+library(BiocManager)
+BiocManager::install("biomaRt")
+library(biomaRt)
+
+
+ensembl = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+chr1_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="1", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr2_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="2", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr3_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="3", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr4_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="4", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr5_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="5", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr6_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="6", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr7_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="7", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr8_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="8", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr9_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="9", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr10_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="10", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr11_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="11", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr12_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="12", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr13_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="13", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr14_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="14", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr15_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="15", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr16_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="16", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr17_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="17", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr18_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="18", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr19_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="19", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr20_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="20", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr21_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="21", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chr22_genes <- getBM(attributes=c('ensembl_gene_id',
+                                  'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                       'chromosome_name', values ="22", 
+                     mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+chrX_genes <- getBM(attributes=c('ensembl_gene_id',
+                                 'ensembl_transcript_id','hgnc_symbol','chromosome_name','start_position','end_position'), filters =
+                      'chromosome_name', values ="X", 
+                    mart = ensembl) %>%
+  filter(hgnc_symbol %in% hpo_sig_genes_list) %>%
+  dplyr::select(-c(ensembl_transcript_id)) %>%
+  unique()
+
+all_genes <- chr1_genes %>% rbind(chr2_genes, chr3_genes, chr4_genes, chr5_genes,
+                                  chr6_genes, chr7_genes, chr8_genes, chr9_genes,
+                                  chr10_genes, chr11_genes, chr12_genes, chr13_genes,
+                                  chr14_genes, chr15_genes, chr16_genes, chr17_genes,
+                                  chr18_genes, chr19_genes, chr19_genes, chr20_genes,
+                                  chr21_genes, chr22_genes, chrX_genes)
+
+
+all_genes_2 <- all_genes %>% dplyr::select(hgnc_symbol, chromosome_name, end_position) %>% 
+  group_by(hgnc_symbol) %>% 
+  slice_min(end_position, with_ties = F) %>% ungroup()
+
+colnames(all_genes_2) <- (c('gene', 'CHR', 'BP'))
+
+
+manh_plot_table <- hpo_sig_genes %>%
+  left_join(all_genes_2) %>%
+  mutate(CHR = case_when(CHR %in% c("X") ~"23", TRUE ~CHR), 
+         CHR = as.numeric(CHR)) %>%
+  mutate(p_value = as.numeric(p_value))
+
+
+colnames(manh_plot_table) <- (c('gene', 'P', 'FDR_SIG', 'CHR', 'BP'))
+
+manh_plot_table_n <- manh_plot_table %>% 
+  mutate(SNP=paste(gene, row_number(), sep="_")) %>%
+  arrange(CHR)
+
+data_cum <- manh_plot_table_n %>% 
+  mutate(CHR = as.numeric(CHR)) %>%
+  group_by(CHR) %>%
+  summarise(max_bp = max(BP)) %>% 
+  mutate(max_bp = as.numeric(max_bp)) %>%
+  mutate(bp_add = lag(cumsum(max_bp))) %>% 
+  dplyr::select(CHR, bp_add)
+
+data_cum[is.na(data_cum)] <- 0
+
+manh_plot_table_n <- manh_plot_table_n %>% 
+  inner_join(data_cum, by = "CHR") %>% 
+  mutate(bp_cum = BP + bp_add)
+
+axis_set <- manh_plot_table_n %>% 
+  arrange(CHR) %>%
+  group_by(CHR) %>% 
+  mutate(center = mean(bp_cum))
+
+#ylim <- manh_plot_table_n %>% 
+# filter(P == min(P)) %>% 
+#  mutate(ylim = abs(floor(log10(P))) + 2) %>% 
+# pull(ylim)
+
+write_csv(manh_plot_table_n, "manh_plot_table_n_Jul3.csv")
+
+manh_plot_table_n_3 <- manh_plot_table_n
+
+ggplot(manh_plot_table_n_3, aes(x = bp_cum, y = -log10(P), 
+                                color = as_factor(CHR))) +
+  geom_hline(yintercept = -log10(2.938373e-05), color = "grey40", linetype = "dashed") +
+  geom_point(size = 5) +
+  #geom_point(manh_plot_table_genes, aes(x = bp_cum, y = -log10(P), 
+  #         color = as_factor(CHR), size = -log10(P)), color = "red")+
+  #geom_point(data=fdr_highlight, colour="red")+
+  #geom_text_repel(aes(label=ifelse(-log10(P)>-log10(sig),as.character(SNP),'')),hjust=0,vjust=0)+
+  scale_x_continuous(label = axis_set$CHR, breaks = axis_set$center) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 6)) +
+  scale_color_manual(values = rep(c("#276FBF", "#183059"), unique(length(axis_set$CHR)))) +
+  #scale_size_continuous(range = c(0.5,3)) +
+  labs(x = "Chromosome", 
+       y = "-log10(p)") + 
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    #axis.title.y = element_markdown(),
+    #axis.text.x = element_text(angle = 60, size = 20, vjust = 0.5)
+  ) +
+  theme(legend.position = "none", legend.title = element_blank(), 
+         axis.text = element_blank(), axis.title = element_blank())+
+  theme(text = element_text(size = 20))
+
+ggsave("manhattan_plot_clean.png", dpi = 500, width = 17, height = 12)
