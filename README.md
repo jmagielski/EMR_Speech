@@ -4,7 +4,7 @@ This repository consists of scripts that were used to analyze electronic medical
 
 ## Scripts ##
 
-[ICD10_code_analyses](https://github.research.chop.edu/magielskij/EMR_Speech/blob/main/ICD10_code_analyses) - finds frequencies of different speech and language phenotypes over time, identifies comorbidities with speech disorders, and determines most common genetic diagnoses in the cohort.
+[ICD10_code_analyses](https://github.com/jmagielski/EMR_Speech/blob/main/ICD10_code_analyses) - finds frequencies of different speech and language phenotypes over time, identifies comorbidities with speech disorders, and determines most common genetic diagnoses in the cohort.
 
 [ICD10_code_genetic_dx](https://github.research.chop.edu/magielskij/EMR_Speech/blob/main/ICD10__genetic_dx) - analyzes the associations between clinical genetic diagnoses and speech and language phenotypes reported in the ICD10 codes of the cohort.
 
