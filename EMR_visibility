@@ -1,0 +1,86 @@
+start <- Sys.time()
+message(" \n Running EMR Visibility analysis... \n ")
+
+
+require(bigrquery)
+library(tidyverse)
+project_id <- if (exists('project_id')) project_id else bq_projects()[1]
+
+# Read in the files.
+
+hpo_def <- read.csv("HPO_def_rl_2020-10-12_dl_2021-08-03.csv",stringsAsFactors = F)
+hpo_anc <- read.csv("HPO_ancs_rl_2020-10-12_dl_2021-08-03.csv",stringsAsFactors = F)
+
+bin_prop <- read.csv("binned_pos_prop_1month_v10.csv")
+
+flat_prop <- bin_prop %>% 
+  select(-c(start_year, finish_year, seq_id)) %>% 
+  distinct() %>% 
+  left_join(hpo_def)
+
+pat_info <- read.csv("pat_info_v7.csv",stringsAsFactors = F) %>% 
+  mutate(MRN = as.character(pat_mrn_id)) %>% 
+  select(pat_id, MRN) %>% 
+  distinct() %>% 
+  mutate(MRN = case_when(nchar(MRN)==7~paste0("0",MRN),
+                         nchar(MRN)==6~paste0("00",MRN),
+                         TRUE~MRN))
+
+table_query = "SELECT pat_id, encounter_id,enc.dx_id, epic_dx_id,umls_concept_id,
+update_age, icd10_code, hpo_code, hpo_concept_name
+FROM arcus.encounter_diagnosis as enc
+LEFT JOIN arcus.icd10_to_hpo as icd10
+ON enc.dx_id = icd10.dx_id"
+
+dx_icd10 <- bq_table_download(bq_project_query(project_id, table_query))
+dx_icd10$age = dx_icd10$update_age/365
+
+
+dx_uni <- dx_icd10 %>% 
+  select(pat_id, dx_id, icd10_code, hpo_code, hpo_concept_name) %>% 
+  distinct() %>% rename(HPO = hpo_code, def = hpo_concept_name)
+
+
+dx_uni$HPO[dx_uni$icd10_code=="R48.2"]="HP:0011098"
+dx_uni$def[dx_uni$icd10_code=="R48.2"]="Speech apraxia"
+
+dx_prop <- dx_uni %>% 
+  select(-def) %>% 
+  left_join(hpo_anc) %>% 
+  separate_rows(ancs, sep=";") %>% 
+  select(pat_id, ancs) %>% 
+  rename(HPO = ancs) %>% 
+  left_join(hpo_def) %>% 
+  distinct()
+
+dx_uni_cnt <- dx_prop %>% 
+  count(def,name="icd_cnt")
+
+hpo_cnt <- flat_prop %>% 
+  count(def, name = "hpo_cnt")
+
+# Calculate EMR Visibility Indices.
+
+comp_cnt <- dx_uni_cnt %>% 
+  left_join(hpo_cnt) %>% 
+  mutate(vis = icd_cnt/hpo_cnt)
+
+
+hps <- c("Speech apraxia","Stuttering","Aphasia","Seizure","Autism",
+         "Intellectual disability", "Attention deficit hyperactivity disorder")
+
+sub_comp <- comp_cnt %>% 
+  filter(def %in% hps)
+
+
+ggplot(sub_comp, aes(x = reorder(def, -vis), y=vis)) +
+  geom_bar(stat='identity',aes(fill = def)) +
+  ylim(c(0,1)) + 
+  ylab("Visibility")+
+  xlab("Phenotype")+
+  theme_classic()+
+  theme(legend.position = "none")
+  
+  message("\n  ...EMR Visbility analysis complete \n ")
+stop = Sys.time()
+stop - start
