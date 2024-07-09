@@ -1,0 +1,582 @@
+start <- Sys.time()
+message(" \n Running ICD10-code phenotype analysis... \n ")
+
+library(librarian)
+library(RColorBrewer)
+librarian::shelf(tidyverse, magrittr, Hmisc) 
+
+
+# Read in the files.
+
+all_encs <- read_csv("allEncs-deid.csv") 
+cohort <- read_csv("allEncICD10-deid.csv")
+
+cohort_all_encs <- all_encs %>% 
+  select(-c(...1, )) %>% 
+  rename(PRIMARY_ICD10 = ICD10_CODE) %>% 
+  left_join(cohort %>% select(-c(...1)), by = "DEID_CSN_ID")
+
+# Define the speech cohort.
+
+patenc_id <- all_encs %>% select(DEID_PAT_ID, DEID_CSN_ID)
+
+speech_cohort <- cohort_all_encs %>%
+  filter(grepl("F80|R4[7-9]", ICD10_CODE)) %>%  
+  select(-DEID_CSN_ID) %>% 
+  distinct()
+  
+speech_cohort$DEID_PAT_ID %>% unique() %>% length()
+
+speech_cohort_unq <- speech_cohort %>% select(DEID_PAT_ID, ICD10_CODE) %>% 
+  unique()
+
+speech_dx_count <- speech_cohort_unq %>% unique() %>% count(ICD10_CODE) %>% arrange(n) %>%
+  mutate(ICD10_CODE=factor(ICD10_CODE, levels = unique(ICD10_CODE))) %>%
+  mutate(ICD10_CODE = gsub("\\.", "", ICD10_CODE))
+
+library(readr)
+
+icd10_codes_description <- read_tsv("icd10cm_codes_2020.txt", col_names = "ICD10") %>% 
+  separate(ICD10, into = c("ICD10", "CODE"), sep = "[[:space:]][[:space:]]+") %>% 
+  mutate(ICD10 = trimws(ICD10), CODE = trimws(CODE))
+
+colnames(icd10_codes_description) <- c("ICD10_CODE", "Description")
+
+speech_dx_count <- speech_dx_count %>%
+  left_join(icd10_codes_description) %>%
+  select(n, Description) %>%
+  filter(n>5) %>%
+  arrange(desc(n)) 
+
+ggplot(speech_dx_count, aes(y = reorder(Description, n), x = n)) + 
+         geom_col(fill = "steelblue") +
+         xlab("Count")+
+         ylab("Speech phenotype")+
+         theme_classic()+
+         theme(legend.title = element_blank())+
+         theme(text = element_text(size = 20))
+       
+ggsave("speech_dx_counts.png", dpi = 1000, width = 20, height = 15)
+
+
+all_encs %>% pull(DEID_PAT_ID) %>% unique() %>% length()
+speech_cohort %>% pull(DEID_PAT_ID) %>% unique() %>% length()
+
+
+speech_encs <- all_encs %>% filter(DEID_PAT_ID %in% speech_cohort$DEID_PAT_ID)
+
+
+speech_encs$DEID_PAT_ID %>% unique() %>% length() 
+
+
+speech_encs$DEID_CSN_ID %>% unique() %>% length() 
+
+
+pt_yrs <- speech_encs %>% 
+  dplyr::group_by(DEID_PAT_ID) %>% 
+  dplyr::summarize(min_age = min(AGE, na.rm = T),
+                   max_age = max(AGE, na.rm = T),
+                   duration_yrs = (max_age - min_age)/365)
+sum(pt_yrs$duration_yrs)
+
+speech_encs_time <- speech_encs %>% 
+  select(AGE, DEID_PAT_ID, ICD10_CODE, CHOP_NAME, DEID_CSN_ID) %>% 
+  arrange(AGE) %>%
+  #filter(DEID_PAT_ID %in% random_sub) %>% 
+  mutate(DEID_PAT_ID=factor(DEID_PAT_ID, levels = unique(DEID_PAT_ID)),
+         AGE = AGE/365.24) %>%
+  filter(AGE>0)
+  
+ggplot(speech_encs_time, aes(x=AGE, y=DEID_PAT_ID)) + 
+  geom_point(position="jitter", color = "steelblue", alpha = 0.01, size = 0.02) +
+  xlab("Age in years") +
+  xlim(0,20) +
+  ylab("Individuals (ordered by first encounter)") +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  theme(text = element_text(size = 20))
+
+# Define the sub-cohorts of specific speech phenotypes.
+
+apraxia_cohort <- speech_cohort_unq %>% filter(ICD10_CODE == "R48.2")
+apraxia_cohort$DEID_PAT_ID %>% unique() %>% length()
+apraxia_IDs <- apraxia_cohort %>% pull(DEID_PAT_ID) %>% unique()
+
+stuttering_cohort <- speech_cohort_unq %>% filter(ICD10_CODE == "F80.81")
+stuttering_cohort$DEID_PAT_ID %>% unique() %>% length()
+stuttering_IDs <- stuttering_cohort %>% pull(DEID_PAT_ID) %>% unique()
+
+dysarthria_cohort <- speech_cohort_unq %>% filter(ICD10_CODE == "R47.1")
+dysarthria_cohort$DEID_PAT_ID %>% unique() %>% length()
+dysarthria_IDs <- dysarthria_cohort %>% pull(DEID_PAT_ID) %>% unique()
+
+
+speech_IDs_with_genedx <- speech_encs %>% filter(ICD10_CODE == "Z15.89") %>% unique()  
+speech_IDs_genedx <- speech_IDs_with_genedx %>% pull(DEID_PAT_ID) %>% unique()
+
+
+stuttering_with_genedx <- speech_IDs_with_genedx %>% filter(DEID_PAT_ID %in% stuttering_cohort$DEID_PAT_ID)
+stuttering_with_genedx_count <- stuttering_with_genedx %>% count(CHOP_NAME)
+
+speech_diagnosis_ICD <- speech_encs_time %>% filter(grepl("F80|R4[7-9]", ICD10_CODE)) %>% pull(ICD10_CODE) %>% unique()
+speech_diagnosis_ICD %>% length()
+
+
+pat_enc_sum <- speech_encs_time %>% 
+   mutate(age_bin = floor(AGE)) %>%
+   select(DEID_PAT_ID, age_bin, ICD10_CODE) %>% 
+   unique() %>% 
+   dplyr::group_by(DEID_PAT_ID, ICD10_CODE) %>% 
+   dplyr::summarise(min_enc = min(age_bin, na.rm = T),
+                    max_enc = max(age_bin, na.rm = T)) %>% 
+   unique()
+
+frequency_neurodev_mtable <- all_encs %>%
+  mutate(AGE = AGE/182) %>%
+  mutate(age_bin = floor(AGE)) %>%
+  select(age_bin, DEID_PAT_ID) %>%
+  unique() %>%
+  # group_by(DEID_PAT_ID) %>%
+  complete(DEID_PAT_ID, age_bin = full_seq(age_bin, period = 1)) %>%
+  group_by(DEID_PAT_ID) %>%
+  arrange(age_bin) %>%
+  fill(DEID_PAT_ID, .direction = "down") %>%
+  filter(!is.na(DEID_PAT_ID)) %>% 
+  left_join(neuro_enc_sum) %>% 
+  filter(age_bin >= min_enc & age_bin <= max_enc) %>% 
+  group_by(age_bin) %>%
+  dplyr::summarize(n=n()) %>%
+  filter(age_bin < 84) %>%
+  filter(age_bin > -1) %>%
+  rename("ntotal" = n) %>%
+  filter(age_bin < 41)
+
+
+speech_encs_mtime <- speech_encs %>% 
+  select(AGE, DEID_PAT_ID, ICD10_CODE, CHOP_NAME, DEID_CSN_ID) %>% 
+  arrange(AGE) %>%
+  mutate(DEID_PAT_ID=factor(DEID_PAT_ID, levels = unique(DEID_PAT_ID)),
+         AGE = AGE/182) %>%
+  filter(AGE>0)
+
+frequency_speech_mtable <- speech_encs_mtime %>%
+  mutate(age_bin = floor(AGE)) %>%
+  filter(ICD10_CODE %in% speech_diagnosis_ICD) %>%
+  select(age_bin, DEID_PAT_ID) %>%
+  unique() %>%
+  group_by(age_bin) %>%
+  dplyr::summarize(n=n()) %>%
+  filter(age_bin < 41) %>%
+  filter(age_bin > -1)
+
+frequency_speech_mtable <- left_join(frequency_speech_mtable, frequency_neurodev_mtable, by = "age_bin") %>%
+  mutate(freq = n/ntotal) 
+
+frequency_stutter_mtable <- speech_encs_mtime %>%
+  mutate(age_bin = floor(AGE)) %>%
+  filter(ICD10_CODE == "F80.81") %>%
+  select(age_bin, DEID_PAT_ID) %>%
+  unique() %>%
+  group_by(age_bin) %>%
+  dplyr::summarize(n=n()) %>%
+  filter(age_bin < 41) %>% 
+  rename("n_stutter" = n)
+
+
+frequency_stutter <- frequency_stutter_mtable %>% right_join(frequency_speech_mtable, by = c("age_bin")) %>%
+  mutate(freq_stutter_NDD = n_stutter/ntotal) %>%
+  mutate(freq_stutter = n_stutter/n)
+
+frequency_apraxia_table <- speech_encs_mtime %>%
+  mutate(age_bin = floor(AGE)) %>%
+  filter(ICD10_CODE == "R48.2") %>%
+  select(age_bin, DEID_PAT_ID) %>%
+  unique() %>%
+  group_by(age_bin) %>%
+  dplyr::summarize(n=n()) %>%
+  filter(age_bin < 41) %>%
+  rename("n_apraxia" = n)
+
+frequency_apraxia <- right_join(frequency_apraxia_table, frequency_speech_mtable) %>%
+  mutate(freq_apraxia = n_apraxia/n) %>%
+  mutate(freq_apraxia_NDD = n_apraxia/ntotal) 
+
+frequency_dysarthria_table <- speech_encs_mtime %>%
+  mutate(age_bin = floor(AGE)) %>%
+  filter(ICD10_CODE == "R47.1") %>%
+  select(age_bin, DEID_PAT_ID) %>%
+  unique() %>%
+  group_by(age_bin) %>%
+  dplyr::summarize(n=n()) %>%
+  filter(age_bin < 41) %>%
+  rename("n_dysarthria" = n)
+
+frequency_dysarthria <- right_join(frequency_dysarthria_table, frequency_speech_mtable) %>%
+  mutate(freq_dysarthria = n_dysarthria/n) %>%
+  mutate(freq_dysarthria_NDD = n_dysarthria/ntotal)  
+
+ggplot()+
+  theme_classic()+
+  geom_step(data = frequency_stutter, aes(x = age_bin, y = freq_stutter_NDD), 
+            stat = "identity", color = "dark green", size = 1)+
+  geom_step(data = frequency_apraxia, aes(x = age_bin, y = freq_apraxia_NDD), 
+            stat = "identity", color = "tomato", size = 1)+
+  geom_step(data = frequency_dysarthria, aes(x = age_bin, y = freq_dysarthria_NDD),
+            stat = "identity", color = "steelblue", size = 1)
+
+ggsave("spec_speech_phen_step.png", dpi=1000, width = 10, height = 16)
+
+# Speech cohort with genetic diagnosis
+
+speech_IDs_with_gene <- speech_IDs_with_genedx %>% select(AGE, CHOP_NAME, DEID_PAT_ID) %>% 
+  mutate(gene = str_extract(CHOP_NAME, "[[:upper:]]([[:upper:]]|[:digit:]|-)+")) %>%
+  filter(!grepl("SNHL|MELAS|GMFCS|KBG|DNA|ADHD|Q10|CIDP|CF|MCA|MPS|B-|AML|PVC|POTS|URI|DVD|CDG|LVH|MERRF|CVA|QT|PDH|PFAPA|EEG|FTT|ILD|IV|CODAS|ASD|X-|G-|OSA|Q-T|SGA|B-|CKD|MRI|PCD|NARP|COPD|JXG|IVH|EDS|HSV|XX|HLHS|EKG|CNS|COVID-19|VNS|FUO|SCID|CVID", gene))
+
+speech_IDs_gene_freq <- speech_IDs_with_gene %>% select(CHOP_NAME, DEID_PAT_ID, gene) %>% unique()
+
+gene_counts <- speech_IDs_gene_freq %>% count(gene) %>% filter(!is.na(gene)) %>% arrange(n) %>%
+  mutate(gene=factor(gene, levels = unique(gene)))
+
+speech_encs_time_final <- speech_encs_time %>% 
+  left_join(speech_IDs_with_gene %>% select(DEID_PAT_ID, gene) %>% unique(), by = c("DEID_PAT_ID"))
+
+speech_encs_time_final <- speech_encs_time_final %>% 
+  filter(!is.na(ICD10_CODE)) %>% 
+  select(-c(AGE, CHOP_NAME, DEID_CSN_ID)) %>%
+  unique()
+
+gene_counts <- gene_counts %>%
+  filter(n>2)
+  
+ggplot(gene_counts, aes(y = gene, x = n)) + 
+  geom_col(fill = "steelblue") +
+  xlab("Count")+
+  ylab("Genetic diagnosis")+
+  theme_classic()+
+  theme(legend.position = "none", legend.title = element_blank(), 
+        axis.text = element_blank(), axis.title = element_blank())+
+  theme(text = element_text(size = 10))
+  
+
+ggsave("gene_counts_2.png", dpi = 500, width = 10, height = 15)
+
+
+# Epilepsy sub-cohort with speech diagnosis.
+
+epilepsy_with_speech_dx <- cohort %>% 
+  filter(grepl("G40", ICD10_CODE)) %>% 
+  left_join(patenc_id) %>% 
+  select(-DEID_CSN_ID, -...1) %>% 
+  filter(DEID_PAT_ID %in% speech_cohort$DEID_PAT_ID) %>%
+  unique()
+
+epilepsy_IDs <- cohort_all_encs %>% filter(grepl("G40", ICD10_CODE)) %>%
+  select(DEID_PAT_ID) %>%
+  unique() %>%
+  pull()
+
+epilepsy_with_speech_dx$DEID_PAT_ID %>% unique %>% length()
+
+epilepsy_speech_IDs <- epilepsy_with_speech_dx %>% pull(DEID_PAT_ID) %>% unique()
+
+
+data_1 <- data.frame("speech_phen_yes" = c(3080, 49063),
+                     "speech_phen_no" = c(12025, 201758),
+                     row.names = c("epi", "no epi"))
+test_1 <- fisher.test(data_1)
+
+
+# Movement disorder sub-cohort with speech diagnosis.
+
+movement_with_speech_dx <- cohort %>% 
+  filter(grepl("G2[0-6]", ICD10_CODE)) %>% 
+  left_join(patenc_id) %>% 
+  dplyr::select(-c(DEID_CSN_ID, ...1)) %>% 
+  filter(DEID_PAT_ID %in% speech_cohort$DEID_PAT_ID) %>%
+  unique()
+
+movement_with_speech_dx$DEID_PAT_ID %>% unique %>% length()
+
+movement_IDs <- cohort_all_encs %>% filter(grepl("G2[0-6]", ICD10_CODE)) %>%
+  dplyr::select(DEID_PAT_ID) %>%
+  unique() %>%
+  pull()
+
+
+movement_speech_IDs <- movement_with_speech_dx %>% pull(DEID_PAT_ID) %>% unique()
+
+
+data_2 <- data.frame("speech_phen_yes" = c(1070, 51073),
+                     "speech_phen_no" = c(4505, 209278),
+                     row.names = c("mov", "no mov"))
+test_2 <- fisher.test(data_2)
+
+# Developmental disorder sub-cohort with speech diagnosis.
+
+DD_with_speech_dx <- cohort %>% 
+  filter(grepl("F84|F88|F89", ICD10_CODE)) %>% 
+  left_join(patenc_id) %>% 
+  dplyr::select(-DEID_CSN_ID, -...1) %>% 
+  filter(DEID_PAT_ID %in% speech_cohort$DEID_PAT_ID) %>%
+  unique()
+
+DD_with_speech_dx$DEID_PAT_ID %>% unique %>% length()
+DD_speech_IDs <- DD_with_speech_dx %>% pull(DEID_PAT_ID) %>% unique()
+
+dd_IDs <- cohort_all_encs %>% filter(grepl("F84|F88|F89", ICD10_CODE)) %>%
+  dplyr::select(DEID_PAT_ID) %>%
+  unique() %>%
+  pull()
+
+
+data_3 <- data.frame("speech_phen_yes" = c(15806, 36337),
+                     "speech_phen_no" = c(13282, 200501),
+                     row.names = c("dev", "no dev"))
+test_3 <- fisher.test(data_3)
+
+# Epilepsy, developmental disorder, and movement disorder counts.
+
+epilepsy_counts <- epilepsy_with_speech_dx %>% count(ICD10_CODE) %>% filter(!is.na(ICD10_CODE)) %>% arrange(n) %>%
+  mutate(ICD10_CODE=factor(ICD10_CODE, levels = unique(ICD10_CODE))) %>%
+  mutate(ICD10_CODE = gsub("\\.", "", ICD10_CODE)) %>%
+  left_join(icd10_codes_description) %>%
+  filter(n>15) %>%
+  filter(!is.na(Description)) %>%
+  mutate(Descript_2 = case_when(ICD10_CODE == "G40909" ~ "Epilepsy, unspecified",
+                                ICD10_CODE =="G40209" ~ "Focal epilepsy with complex partial seizures",
+                                ICD10_CODE == "G40109" ~ "Focal epilepsy with simple partial seizures",
+                                ICD10_CODE == "G40309" ~ "Generalized epilepsy",
+                                ICD10_CODE == "G40409" ~ "Other generalized epilepsy syndromes",
+                                ICD10_CODE == "G40219" ~ "Focal epilepsy with complex partial seizures, intractable", 
+                                ICD10_CODE == "G40802" ~ "Other epilepsy",
+                                ICD10_CODE == "G40901" ~ "Epilepsy, unspecified, with status epilepticus",
+                                ICD10_CODE == "G40919" ~ "Epilepsy, unspecified, intractable",
+                                ICD10_CODE == "G40822" ~ "Epileptic spasms",
+                                ICD10_CODE == "G40A09" ~ "Absence epilepsy",
+                                ICD10_CODE == "G40804" ~ "Other epilepsy, intractable",
+                                ICD10_CODE == "G40319" ~ "Generalized epilepsy, intractable",
+                                ICD10_CODE == "G40009" ~ "Focal epilepsy", 
+                                ICD10_CODE == "G40814" ~ "Lennox-Gastaut syndrome, intractable",
+                                ICD10_CODE == "G40824" ~ "Epileptic spasms, intractable",
+                                ICD10_CODE == "G40812" ~ "Lennox-Gastaut syndrome",
+                                ICD10_CODE == "G40119" ~ "Focal epilepsy with simple partial seizures",
+                                ICD10_CODE == "G40419" ~ "Other generalized epilepsy syndromes, intractable",
+                                ICD10_CODE == "G40201" ~ "Focal epilepsy with complex partial seizures, with status epilepticus",
+                                ICD10_CODE == "G40211" ~ "Focal epilepsy with complex partial seizures, intractable, with status epilepticus",
+                                ICD10_CODE == "G4089" ~ "Other seizures",
+                                ICD10_CODE == "G40813" ~ "Lennox-Gastaut syndrome, intractable, with status epilepticus",
+                                ICD10_CODE == "G40019" ~ "Focal epilepsy, intractable",
+                                ICD10_CODE == "G40911" ~ "Epilepsy, unspecified, intractable, with status epilepticus",
+                                ICD10_CODE == "G40001" ~ "Focal epilepsy, with status epilepticus",
+                                ICD10_CODE == "G40A19" ~ "Absence epilepsy, intractable",
+                                ICD10_CODE == "G40411" ~ "Generalized epilepsy, intractable, with status epilepticus",
+                            TRUE ~ "x"))
+
+ggplot(epilepsy_counts, aes(y = reorder(Descript_2, n), x = n)) + 
+  geom_col(fill = "steelblue") +
+  xlab("Count")+
+  ylab("Epilepsy diagnosis")+
+  theme_classic() +
+  theme(text = element_text(size = 20))
+
+ggsave("epilepsy_counts.png", dpi = 300, width = 20, height = 15)
+
+
+DD_counts <- DD_with_speech_dx %>% count(ICD10_CODE) %>% filter(!is.na(ICD10_CODE)) %>% arrange(n) %>%
+  mutate(ICD10_CODE=factor(ICD10_CODE, levels = unique(ICD10_CODE))) %>%
+  mutate(ICD10_CODE = gsub("\\.", "", ICD10_CODE)) %>%
+  left_join(icd10_codes_description) %>%
+  filter(!is.na(Description)) %>%
+  mutate(Descript_2 = case_when(ICD10_CODE == "F840" ~ "Autism",
+                                ICD10_CODE == "F88" ~ "Other disorder of psychological development",
+                                ICD10_CODE == "F849" ~ "Pervasive developmental disorder",
+                                ICD10_CODE == "F89" ~ "Unspecified disorder of psychological development",
+                                ICD10_CODE == "F845" ~ "Asperger's syndrome",
+                                ICD10_CODE == "F842" ~ "Rett's syndrome",
+                                ICD10_CODE == "F848" ~ " Other pervasive developmental disorders",
+                                TRUE ~"x"))
+         
+
+ggplot(DD_counts, aes(y = reorder(Descript_2, n), x = n)) + 
+  geom_col(fill = "steelblue") +
+  xlab("Count")+
+  ylab("Developmental disorder diagnosis")+
+  theme_classic() +
+  theme(legend.position = "none", legend.title = element_blank(), 
+        axis.text = element_blank(), axis.title = element_blank())+
+  theme(text = element_text(size = 10))
+
+ggsave("DD_counts.png", dpi = 300, width = 12, height = 3)
+
+movement_count <- movement_with_speech_dx %>% count(ICD10_CODE) %>% filter(!is.na(ICD10_CODE)) %>% arrange(n) %>%
+  mutate(ICD10_CODE=factor(ICD10_CODE, levels = unique(ICD10_CODE))) %>%
+  mutate(ICD10_CODE = gsub("\\.", "", ICD10_CODE)) %>%
+  left_join(icd10_codes_description) %>%
+  filter(!is.na(Description)) %>%
+  filter(n>5)
+
+ggplot(movement_count, aes(y = reorder(Description, n), x = n)) + 
+  geom_col(fill = "steelblue") +
+  xlab("Count")+
+  ylab("Movement disorder diagnosis")+
+  theme_classic()+
+  theme(text = element_text(size = 10))
+
+ggsave("Movement_counts.png", dpi = 300, width = 7, height = 4)
+
+
+# Cumulative onset of speech diagnosis.
+
+c_onset <- speech_cohort %>%
+  mutate(AGE = AGE/365.24) %>%
+  filter(AGE > 0 & AGE < 21) %>%
+  filter(grepl("F80|R4[7-9]", ICD10_CODE)) %>%
+  group_by(DEID_PAT_ID) %>%
+  summarise(x=min(AGE)) %>%
+  arrange(x) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/52142)
+
+ggplot(c_onset, aes(y = cum_perc, x = x))+
+  geom_step(color = "steelblue", linewidth = 1)+
+  geom_vline(xintercept=10.76552, linetype = "dashed", color="tomato", linewidth = 2)+
+  theme_classic()+
+  xlab("Age in years")+
+  ylab("Cumulative percent")+
+  theme(text = element_text(size = 20))
+  
+
+ggsave("Cumulative_percent.png", dpi = 300, width = 15, height = 12)
+
+c_onset_genedx <- c_onset %>%
+  mutate(genedx = case_when(DEID_PAT_ID %in% speech_IDs_genedx ~ "With genetic diagnosis",
+                            TRUE ~ "Without genetic diagnosis"))%>%
+  arrange(x)%>%
+  select(-c(cum_perc))
+
+
+genedx <- c_onset_genedx %>% filter(genedx == "With genetic diagnosis") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/606)
+
+
+no_genedx <- c_onset_genedx %>% 
+  filter(genedx == "Without genetic diagnosis") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/51331)
+
+c_onset_gene_final <- genedx %>% rbind(no_genedx)
+
+
+ggplot(c_onset_gene_final, aes(y = cum_perc, x = x, color = genedx))+
+  geom_step(linewidth = 1)+
+  scale_color_manual(values=c("tomato", "steelblue"))+
+  #geom_vline(xintercept=10.76552, linetype = "dashed", color="tomato")+
+  theme_classic()+
+  geom_vline(xintercept=11.96, linetype = "dashed", color="tomato", linewidth = 2)+
+  geom_vline(xintercept = 10.54, linetype = "dashed", color="steelblue", linewidth = 2)+
+  xlab("Age in years")+
+  ylab("Cumulative percent") +
+  theme(legend.title = element_blank())+
+  theme(legend.position = "none", legend.title = element_blank(), 
+        axis.text = element_blank(), axis.title = element_blank())+
+  theme(text = element_text(size = 20))
+
+ggsave("Cumaltive_onset_gene_2.png", dpi = 500, width = 18, height = 12)
+
+
+test <- t.test(genedx$x, no_genedx$x, alternative = "two_sided", var.equal = FALSE)
+
+
+c_onset_epi <- c_onset %>%
+  mutate(epi = case_when(DEID_PAT_ID %in% epilepsy_speech_IDs ~ "With epilepsy",
+                            TRUE ~ "Without epilepsy"))%>%
+  arrange(x)%>%
+  select(-c(cum_perc))
+
+epilepsy <- c_onset_epi %>% filter(epi == "With epilepsy") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/3029)
+
+no_epilepsy <- c_onset_epi %>% 
+  filter(epi == "Without epilepsy") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/48908)
+
+c_onset_epilepsy_final <- epilepsy %>% rbind(no_epilepsy)
+
+ggplot(c_onset_epilepsy_final, aes(y = cum_perc, x = x, color = epi))+
+  geom_step(linewidth = 1)+
+  scale_color_manual(values=c("tomato", "steelblue"))+
+  #geom_vline(xintercept=10.76552, linetype = "dashed", color="tomato")+
+  theme_classic()+
+  geom_vline(xintercept=14.58, linetype = "dashed", color="tomato", linewidth = 2)+
+  geom_vline(xintercept = 10.13, linetype = "dashed", color="steelblue", linewidth = 2)+
+  xlab("Age in years")+
+  ylab("Cumulative percent") +
+  theme(legend.title = element_blank())+
+  theme(legend.position = "none", legend.title = element_blank(), 
+        axis.text = element_blank(), axis.title = element_blank())+
+  theme(text = element_text(size = 20))
+
+ggsave("Cumaltive_onset_epilepsy_2.png", dpi = 500, width = 18, height = 12)
+
+
+test_2 <- t.test(epilepsy$x, no_epilepsy$x, alternative = "two_sided", var.equal = FALSE)
+
+
+c_onset_DD <- c_onset %>%
+  mutate(dd = case_when(DEID_PAT_ID %in% DD_speech_IDs ~ "With developmental disorder",
+                         TRUE ~ "Without developmental disorder"))%>%
+  arrange(x)%>%
+  select(-c(cum_perc))
+
+DD <- c_onset_DD %>% filter(dd == "With developmental disorder") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/15764)
+
+no_DD <- c_onset_DD %>% 
+  filter(dd == "Without developmental disorder") %>%
+  select(-c(rank)) %>%
+  mutate(rank = seq(DEID_PAT_ID)) %>%
+  mutate(cum_perc = rank/36173)
+
+c_onset_DD_final <- DD %>% rbind(no_DD)
+
+ggplot(c_onset_DD_final, aes(y = cum_perc, x = x, color = dd))+
+  geom_step(linewidth = 1)+
+  scale_color_manual(values=c("tomato", "steelblue"))+
+  theme_classic()+
+  geom_vline(xintercept=10.19, linetype = "dashed", color="tomato", linewidth = 2)+
+  geom_vline(xintercept = 10.74, linetype = "dashed", color="steelblue", linewidth = 2)+
+  xlab("Age in years")+
+  ylab("Cumulative percent") +
+  theme(legend.title = element_blank()) +
+  theme(text = element_text(size = 20))+
+  theme(legend.title = element_blank())+
+  theme(legend.position = "none", legend.title = element_blank(), 
+        axis.text = element_blank(), axis.title = element_blank())
+
+ggsave("Cumaltive_onset_DD_2.png", dpi = 500, width = 18, height = 12)
+
+
+test_3 <- t.test(DD$x, no_DD$x, alternative = "two_sided", var.equal = FALSE)
+
+# Phenotypic overlaps.
+
+overlaps <- cohort_all_encs %>%
+  select(DEID_PAT_ID, ICD10_CODE) %>%
+  unique() %>%
+  mutate(speech = case_when(ICD10_CODE %in% speech_diagnosis_ICD ~ "yes", TRUE ~ "no")) %>%
+  mutate(epilepsy = case_when(DEID_PAT_ID %in% epilepsy_IDs ~ "yes", TRUE ~ "no")) %>%
+  mutate(development = case_when(DEID_PAT_ID %in% dd_IDs ~ "yes", TRUE ~ "no")) %>%
+  mutate(movement = case_when(DEID_PAT_ID %in% movement_IDs ~ "yes", TRUE ~ "no")) 
+  
+  
+message("\n  ...ICD10-code phenotype analysis complete \n ")
+stop = Sys.time()
+stop - start
